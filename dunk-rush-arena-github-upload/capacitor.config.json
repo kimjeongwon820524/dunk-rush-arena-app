@@ -1,0 +1,9 @@
+{
+  "appId": "com.happychurch.dunkrusharena",
+  "appName": "Dunk Rush Arena",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true
+  }
+}

@@ -1,0 +1,1611 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>덩크 러시 아레나 - DUNK RUSH ARENA</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color: transparent; user-select:none; }
+  html, body {
+    width:100%; height:100%; overflow:hidden;
+    background:#05070f;
+    font-family: 'Segoe UI', 'Malgun Gothic', sans-serif;
+    touch-action:none;
+  }
+  #stage {
+    position:fixed; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at center, #101830 0%, #05070f 70%);
+  }
+  canvas {
+    display:block;
+    background:#0b1024;
+    box-shadow: 0 0 40px rgba(0,200,255,0.15);
+    border-radius: 6px;
+    touch-action:none;
+  }
+  #hint {
+    position:fixed; bottom:6px; left:0; right:0;
+    text-align:center; color:#5a6a8a; font-size:11px;
+    letter-spacing:1px; pointer-events:none;
+  }
+  #mpOverlay {
+    position:absolute; display:none; flex-direction:column; align-items:center; justify-content:center;
+    gap:10px; padding:16px; overflow-y:auto;
+    background:rgba(5,7,20,0.97); border-radius:6px; z-index:5;
+  }
+  #mpOverlay.show { display:flex; }
+  #mpOverlay .mpPanel { width:100%; max-width:520px; display:flex; flex-direction:column; gap:8px; }
+  #mpOverlay h2 { color:#29e0ff; font-size:clamp(16px,3vw,22px); text-align:center; margin-bottom:4px; }
+  #mpOverlay p { color:#9fb3d9; font-size:clamp(11px,2.2vw,13px); line-height:1.5; text-align:center; }
+  #mpOverlay textarea {
+    width:100%; min-height:70px; max-height:120px; resize:vertical;
+    background:#12183a; color:#e8f0ff; border:1px solid rgba(255,255,255,0.25); border-radius:6px;
+    font-size:11px; padding:8px; font-family: monospace; user-select:text; -webkit-user-select:text;
+  }
+  #mpOverlay button {
+    padding:12px; border-radius:6px; border:none; font-weight:bold; font-size:14px;
+    cursor:pointer; color:#000;
+  }
+  #mpOverlay .btnPrimary { background:#29e0ff; }
+  #mpOverlay .btnOrange { background:#ff8a2b; }
+  #mpOverlay .btnGray { background:#5a6a8a; color:#fff; }
+  #mpOverlay .status { color:#4dff88; font-size:12px; text-align:center; min-height:16px; }
+  #mpOverlay .stepnum { color:#ffe66d; font-weight:bold; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game"></canvas>
+  <div id="mpOverlay"></div>
+</div>
+<div id="hint">DUNK RUSH ARENA — 데스크탑: 방향키/WASD + SPACE(슛/덩크) + SHIFT(스페셜) · 모바일: 터치 조이스틱 + 버튼</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ============================================================
+   DUNK RUSH ARENA
+   - 오리지널 아케이드 농구 게임 (원작 캐릭터/로고 미사용, 독자 디자인)
+   ============================================================ */
+
+const BASE_W = 960, BASE_H = 540;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resize(){
+  const dpr = window.devicePixelRatio || 1;
+  const availW = window.innerWidth;
+  const availH = window.innerHeight - 24;
+  const scale = Math.min(availW/BASE_W, availH/BASE_H);
+  const cssW = Math.floor(BASE_W*scale), cssH = Math.floor(BASE_H*scale);
+  canvas.style.width = cssW+'px';
+  canvas.style.height = cssH+'px';
+  canvas.width = Math.round(BASE_W*dpr);
+  canvas.height = Math.round(BASE_H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function toLogical(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) / rect.width * BASE_W,
+    y: (clientY - rect.top) / rect.height * BASE_H
+  };
+}
+
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+function lerp(a,b,t){ return a+(b-a)*t; }
+function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1,y2-y1); }
+function rand(a,b){ return a+Math.random()*(b-a); }
+
+/* ---------------- Simple synth audio (no external assets) ---------------- */
+const Audio_ = (function(){
+  let actx = null;
+  function ctxReady(){
+    if(!actx){
+      try{ actx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){}
+    }
+    return actx;
+  }
+  function beep(freq, dur, type, vol, delay){
+    const a = ctxReady();
+    if(!a) return;
+    const t0 = a.currentTime + (delay||0);
+    const osc = a.createOscillator();
+    const gain = a.createGain();
+    osc.type = type||'square';
+    osc.frequency.setValueAtTime(freq, t0);
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(vol||0.15, t0+0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0+dur);
+    osc.connect(gain); gain.connect(a.destination);
+    osc.start(t0); osc.stop(t0+dur+0.02);
+  }
+  return {
+    unlock(){ ctxReady(); if(actx && actx.state==='suspended') actx.resume(); },
+    score2(){ beep(660,0.12,'square',0.12); beep(880,0.14,'square',0.10,0.06); },
+    score3(){ beep(660,0.10,'square',0.12); beep(880,0.10,'square',0.12,0.05); beep(1180,0.16,'square',0.12,0.10); playSfxFile('sfx_whistle.wav',0.25); },
+    dunk(){ beep(120,0.18,'sawtooth',0.22); beep(90,0.22,'sawtooth',0.18,0.05); playSfxFile('sfx_dunk_impact.wav',0.6); playSfxFile('sfx_cheer.wav',0.3); },
+    special(){ beep(440,0.08,'square',0.14); beep(660,0.08,'square',0.14,0.06); beep(880,0.08,'square',0.14,0.12); beep(1320,0.25,'square',0.16,0.18); playSfxFile('sfx_cheer.wav',0.55); },
+    miss(){ beep(180,0.15,'sawtooth',0.10); playSfxFile('sfx_groan.wav',0.4); },
+    click(){ beep(500,0.05,'square',0.08); playSfxFile('sfx_click.wav',0.4); },
+    buzzer(){ beep(200,0.5,'sawtooth',0.2); beep(150,0.6,'sawtooth',0.18,0.05); playSfxFile('sfx_buzzer.wav',0.6); },
+    combo(mult){ if(mult>=2 && mult<=4) playSfxFile('sfx_combo_'+Math.min(3,mult-1)+'.wav', 0.4); },
+    teamJingle(id){ playSfxFile('team_'+id+'.wav', 0.35); },
+    bounce(){ playSfxFile('sfx_bounce.wav', 0.2); }
+  };
+})();
+
+/* ---------------- 번들 오디오 (앱 패키징 시 assets/audio에 실음원이 포함됨) ----------------
+   파일이 없으면(=브라우저에서 단일 html로 바로 열었을 때) 조용히 무시되고
+   위의 오실레이터 효과음만으로도 정상 동작합니다 — 완전히 선택적(progressive) 레이어. */
+const AUDIO_BASE = 'assets/audio/';
+function playSfxFile(name, volume){
+  try{
+    const el = new window.Audio(AUDIO_BASE+name);
+    el.volume = volume==null?0.5:volume;
+    const p = el.play();
+    if(p && p.catch) p.catch(()=>{});
+  }catch(e){}
+}
+const MusicPlayer = (function(){
+  let musicEl=null, ambienceEl=null;
+  function playTrack(name, opts){
+    opts = opts||{};
+    stop();
+    try{
+      const el = new window.Audio(AUDIO_BASE+name);
+      el.loop = opts.loop!==false;
+      el.volume = opts.volume==null?0.5:opts.volume;
+      const p = el.play();
+      if(p && p.catch) p.catch(()=>{});
+      musicEl = el;
+    }catch(e){}
+  }
+  function stop(){ if(musicEl){ try{ musicEl.pause(); }catch(e){} musicEl=null; } }
+  function playAmbience(name, volume){
+    stopAmbience();
+    try{
+      const el = new window.Audio(AUDIO_BASE+name);
+      el.loop = true; el.volume = volume==null?0.25:volume;
+      const p = el.play();
+      if(p && p.catch) p.catch(()=>{});
+      ambienceEl = el;
+    }catch(e){}
+  }
+  function stopAmbience(){ if(ambienceEl){ try{ ambienceEl.pause(); }catch(e){} ambienceEl=null; } }
+  return { playTrack, stop, playAmbience, stopAmbience };
+})();
+
+let _lastMusicState = null;
+function updateMusicForState(){
+  if(STATE===_lastMusicState) return;
+  const prev = _lastMusicState;
+  _lastMusicState = STATE;
+  const menuStates = ['MENU','SELECT','MP_MENU','MP_SELECT','MP_HOST_WAIT','MP_JOIN_ENTER','MP_JOIN_WAIT'];
+  const playStates = ['PLAYING','MP_PLAYING'];
+  const resultStates = ['RESULT','MP_RESULT','MP_WAIT_RESULT'];
+  if(menuStates.includes(STATE) && !menuStates.includes(prev)){
+    MusicPlayer.playTrack('music_menu.wav', {loop:true, volume:0.4});
+    MusicPlayer.stopAmbience();
+  } else if(playStates.includes(STATE) && !playStates.includes(prev)){
+    MusicPlayer.playTrack(Math.random()<0.5?'music_game_a.wav':'music_game_b.wav', {loop:true, volume:0.48});
+    MusicPlayer.playAmbience(Math.random()<0.5?'crowd_ambience_calm.wav':'crowd_ambience_hype.wav', 0.22);
+  } else if(resultStates.includes(STATE) && !resultStates.includes(prev)){
+    MusicPlayer.playTrack('music_result.wav', {loop:true, volume:0.45});
+    MusicPlayer.stopAmbience();
+  } else if(STATE==='MP_COUNTDOWN'){
+    MusicPlayer.stop(); MusicPlayer.stopAmbience();
+  }
+}
+
+/* ---------------- Character data (전부 오리지널 디자인/이름) ---------------- */
+/* 6개 팀: 각기 다른 컨셉/컬러/스탯 성향 + 특수 트레잇(feverMult/contestResist/comboCapBonus)으로
+   실제 플레이 감각이 팀마다 다르게 느껴지도록 구성 */
+const CHARACTERS = [
+  {
+    id:'jets', name:'네온 제츠 (NEON JETS)', role:'스피드형', concept:'빠른 드리블과 높은 점프로 상대를 따돌린다',
+    color:'#29e0ff', dark:'#0f7d94', hair:'#123', hairStyle:'mohawk',
+    speed:9, power:4, shoot:6, jump:8, number:7,
+    special:'라이트닝 덩크', specialDesc:'전광석화 돌파 후 초고속 덩크'
+  },
+  {
+    id:'titans', name:'아이언 타이탄즈 (IRON TITANS)', role:'파워형', concept:'압도적인 힘으로 밀어붙이는 강력한 덩크',
+    color:'#ff8a2b', dark:'#93440f', hair:'#000', hairStyle:'bald',
+    speed:4, power:9, shoot:5, jump:6, number:44,
+    special:'메테오 크래시', specialDesc:'백보드가 흔들리는 강력 파워덩크'
+  },
+  {
+    id:'snipers', name:'선샤인 스나이퍼즈 (SUNSHINE SNIPERS)', role:'정확도형', concept:'어디서 쏘든 정확하게 꽂히는 슈팅',
+    color:'#b26bff', dark:'#5c2f94', hair:'#f4d35e', hairStyle:'ponytail',
+    speed:6, power:4, shoot:9, jump:6, number:11,
+    special:'스카이 파이어샷', specialDesc:'궤적이 불타는 초장거리 확정 3점슛'
+  },
+  {
+    id:'unity', name:'올스타 유니티 (ALLSTAR UNITY)', role:'밸런스형', concept:'약점이 없는 만능 올라운더',
+    color:'#4dff88', dark:'#1e8f4a', hair:'#1a1a1a', hairStyle:'bob',
+    speed:7, power:6, shoot:7, jump:7, number:23,
+    special:'트위스터 스핀덩크', specialDesc:'화려한 회전 확정 덩크'
+  },
+  {
+    id:'tricksters', name:'매직 트릭스터즈 (MAGIC TRICKSTERS)', role:'트릭샷형', concept:'화려한 플레이로 피버를 빠르게 채운다',
+    color:'#ff5cd6', dark:'#8f1f70', hair:'#2fe0c0', hairStyle:'spiky',
+    speed:7, power:3, shoot:6, jump:7, number:99,
+    special:'일루전 리버스덩크', specialDesc:'피버 게이지 35% 더 빠르게 축적, 콤보 한계 +2',
+    feverMult:1.35, comboCapBonus:2
+  },
+  {
+    id:'guardians', name:'스틸 가디언즈 (STEEL GUARDIANS)', role:'수비형', concept:'수비 압박에도 흔들리지 않는 터프함',
+    color:'#5c7a99', dark:'#2b3d4d', hair:'#cfd6de', hairStyle:'flattop',
+    speed:5, power:7, shoot:5, jump:6, number:5,
+    special:'가디언 크러셔', specialDesc:'수비수가 붙어도 성공률 페널티 60% 감소',
+    contestResist:0.6
+  }
+];
+
+/* ---------------- Court geometry ---------------- */
+const COURT = { xMin:55, xMax:865, yMin:95, yMax:465 };
+const HOOP = { x:855, y:195, r:8 };
+const BACKBOARD_X = 892;
+const THREE_PT_X = 470;   // player.x < THREE_PT_X (또는 하단 코너) → 3점
+const DUNK_DIST = 95;
+const GAME_TIME = 90;
+
+/* ---------------- Global game state ---------------- */
+let STATE = 'MENU'; // MENU, SELECT, PLAYING, RESULT
+let selectedCharIdx = 0;
+let lastTime = performance.now();
+
+const input = {
+  moveX:0, moveY:0,
+  actionEdge:false, specialEdge:false,
+  actionHeld:false,
+  joy: { active:false, id:null, baseX:100, baseY:BASE_H-100, knobX:100, knobY:BASE_H-100, dx:0, dy:0 },
+  btnAction: { x:BASE_W-140, y:BASE_H-95, r:44, pressed:false },
+  btnSpecial:{ x:BASE_W-55, y:BASE_H-175, r:34, pressed:false },
+  keys:{}
+};
+
+let particles = [];
+let popups = [];
+let shake = 0;
+
+function spawnParticles(x,y,color,n,power){
+  for(let i=0;i<n;i++){
+    particles.push({
+      x,y,
+      vx:rand(-1,1)*(power||120),
+      vy:rand(-1.4,-0.2)*(power||120),
+      life:rand(0.4,0.9),
+      t:0,
+      color,
+      size:rand(2,5)
+    });
+  }
+}
+function spawnPopup(x,y,text,color,big){
+  popups.push({x,y,text,color,life:1.1,t:0,big:!!big});
+}
+
+/* ---------------- Player / Defender / Ball ---------------- */
+let player, defender, ball, game;
+
+function newGameSession(charIdx){
+  const c = CHARACTERS[charIdx];
+  player = {
+    char:c,
+    x:220, y:270, r:20,
+    vx:0, vy:0,
+    facing:1,
+    jumpT:0, jumping:false,
+    animT:0
+  };
+  defender = {
+    x:650, y:260, r:20, speed: 95
+  };
+  ball = {
+    state:'held', // held, shot, special, loose
+    x:player.x+18, y:player.y-10,
+    t:0, dur:0,
+    startX:0,startY:0, targetX:0, targetY:0,
+    success:false, points:0, isThree:false, isDunk:false, isSpecial:false,
+    respawnT:0
+  };
+  game = {
+    score:0, combo:1, bestCombo:1, fever:0, feverReady:false,
+    dunks:0, makes:0, misses:0,
+    timeLeft: GAME_TIME,
+    specialCooldown:0,
+    ended:false,
+    difficultyT:0,
+    isMP:false, _lastSentScore:0, _lastSendT:0
+  };
+}
+
+/* ============================================================
+   1:1 대결 (같은 Wi-Fi, WebRTC P2P 데이터채널 — 별도 서버 불필요)
+   방식: 호스트가 연결코드(오퍼)를 만들면 게스트가 그 코드를 붙여넣어
+   응답코드(앤서)를 만들고, 호스트가 그 응답코드를 다시 붙여넣으면
+   같은 공유기(LAN) 안에서 브라우저끼리 직접 연결됩니다.
+   연결 후에는 동일한 90초 동안 각자 화면에서 플레이하며 실시간으로
+   서로의 점수를 주고받는 "동시 타임어택 대결" 방식입니다.
+   ============================================================ */
+let MPACTIVE = false;
+const MP = {
+  pc:null, channel:null, isHost:false, connected:false,
+  ready:false, remoteReady:false, remoteCharIdx:0,
+  oppScore:0, oppTimeLeft:GAME_TIME, myFinal:null, oppFinal:null,
+  disconnected:false, countdownT:0, _waitStart:0
+};
+
+function b64FromBytes(bytes){
+  let bin='';
+  const chunk=0x8000;
+  for(let i=0;i<bytes.length;i+=chunk){
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  return btoa(bin);
+}
+function bytesFromB64(b64){
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  return bytes;
+}
+async function compressStr(str){
+  const bytes = new TextEncoder().encode(str);
+  if(window.CompressionStream){
+    try{
+      const cs = new CompressionStream('gzip');
+      const writer = cs.writable.getWriter();
+      writer.write(bytes); writer.close();
+      const out = await new Response(cs.readable).arrayBuffer();
+      return { bytes:new Uint8Array(out), compressed:true };
+    }catch(e){}
+  }
+  return { bytes, compressed:false };
+}
+async function decompressBytes(bytes, compressed){
+  if(compressed && window.DecompressionStream){
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    writer.write(bytes); writer.close();
+    const out = await new Response(ds.readable).arrayBuffer();
+    return new TextDecoder().decode(new Uint8Array(out));
+  }
+  return new TextDecoder().decode(bytes);
+}
+async function encodeSignal(obj){
+  const { bytes, compressed } = await compressStr(JSON.stringify(obj));
+  return (compressed?'Z':'R') + b64FromBytes(bytes);
+}
+async function decodeSignal(code){
+  const clean = code.replace(/\s+/g,'');
+  if(!clean) throw new Error('empty code');
+  const flag = clean[0];
+  const bytes = bytesFromB64(clean.slice(1));
+  const str = await decompressBytes(bytes, flag==='Z');
+  return JSON.parse(str);
+}
+
+function waitIceGatherComplete(pc, timeoutMs){
+  return new Promise(resolve=>{
+    if(pc.iceGatheringState==='complete'){ resolve(); return; }
+    const to = setTimeout(()=>{ pc.removeEventListener('icegatheringstatechange', check); resolve(); }, timeoutMs||2500);
+    function check(){
+      if(pc.iceGatheringState==='complete'){
+        clearTimeout(to); pc.removeEventListener('icegatheringstatechange', check); resolve();
+      }
+    }
+    pc.addEventListener('icegatheringstatechange', check);
+  });
+}
+
+function newPeerConnection(){
+  // 같은 LAN 내 직접 연결이 목적이므로 STUN 서버 없이 로컬(호스트) 후보만 사용
+  return new RTCPeerConnection({ iceServers: [] });
+}
+
+function setupChannel(channel){
+  MP.channel = channel;
+  channel.onopen = ()=>{
+    MP.connected = true; MP.disconnected=false;
+    hideOverlay();
+    enterMPSelect();
+  };
+  channel.onclose = ()=>{ MP.disconnected = true; };
+  channel.onerror = ()=>{ MP.disconnected = true; };
+  channel.onmessage = (ev)=>{
+    let msg; try{ msg = JSON.parse(ev.data); }catch(e){ return; }
+    handleMPMessage(msg);
+  };
+}
+
+function sendMP(obj){
+  if(MP.channel && MP.channel.readyState==='open'){
+    try{ MP.channel.send(JSON.stringify(obj)); }catch(e){}
+  }
+}
+
+function handleMPMessage(msg){
+  if(msg.type==='ready'){
+    MP.remoteReady = true; MP.remoteCharIdx = msg.charIdx;
+    maybeStartMP();
+  } else if(msg.type==='start'){
+    beginMPCountdown();
+  } else if(msg.type==='score'){
+    MP.oppScore = msg.value; MP.oppTimeLeft = msg.timeLeft;
+  } else if(msg.type==='final'){
+    MP.oppFinal = { score: msg.value, bestCombo: msg.bestCombo, dunks: msg.dunks };
+    checkMPBothFinal();
+  } else if(msg.type==='rematch'){
+    MP.ready=false; MP.remoteReady=false; MP.myFinal=null; MP.oppFinal=null;
+    STATE='MP_SELECT';
+  }
+}
+
+async function startHostGame(){
+  cleanupMP();
+  MPACTIVE = true; MP.isHost = true;
+  const pc = newPeerConnection();
+  MP.pc = pc;
+  const channel = pc.createDataChannel('game', {ordered:true});
+  setupChannel(channel);
+  STATE = 'MP_HOST_WAIT';
+  showOverlay(mpLoadingHTML('연결 코드 생성 중...'));
+  try{
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceGatherComplete(pc, 2500);
+    const code = await encodeSignal(pc.localDescription);
+    showHostWaitOverlay(code);
+  }catch(e){
+    showOverlay(mpErrorHTML('연결 코드 생성 실패: '+e.message));
+    bindBack();
+  }
+}
+
+async function submitHostAnswer(code){
+  try{
+    const answer = await decodeSignal(code);
+    await MP.pc.setRemoteDescription(answer);
+    showOverlay(mpLoadingHTML('연결 중... (상대방 화면도 확인해주세요)'));
+  }catch(e){
+    showHostWaitOverlay('', '코드가 올바르지 않습니다. 다시 확인해주세요.');
+  }
+}
+
+function startJoinFlow(){
+  cleanupMP();
+  MPACTIVE = true; MP.isHost = false;
+  STATE = 'MP_JOIN_ENTER';
+  showJoinEnterOverlay();
+}
+
+async function submitJoinOffer(code){
+  showOverlay(mpLoadingHTML('연결 코드 확인 중...'));
+  try{
+    const offer = await decodeSignal(code);
+    const pc = newPeerConnection();
+    MP.pc = pc;
+    pc.ondatachannel = (ev)=>{ setupChannel(ev.channel); };
+    await pc.setRemoteDescription(offer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitIceGatherComplete(pc, 2500);
+    const answerCode = await encodeSignal(pc.localDescription);
+    STATE = 'MP_JOIN_WAIT';
+    showJoinWaitOverlay(answerCode);
+  }catch(e){
+    STATE = 'MP_JOIN_ENTER';
+    showJoinEnterOverlay('코드가 올바르지 않습니다. 다시 확인해주세요.');
+  }
+}
+
+function cleanupMP(){
+  if(MP.pc){ try{ MP.pc.close(); }catch(e){} }
+  if(MP.channel){ try{ MP.channel.close(); }catch(e){} }
+  MP.pc=null; MP.channel=null; MP.connected=false; MP.ready=false; MP.remoteReady=false;
+  MP.oppScore=0; MP.oppTimeLeft=GAME_TIME; MP.myFinal=null; MP.oppFinal=null; MP.disconnected=false;
+  MPACTIVE = false;
+}
+
+function enterMPSelect(){ STATE = 'MP_SELECT'; }
+
+function confirmMPReady(){
+  MP.ready = true;
+  sendMP({type:'ready', charIdx:selectedCharIdx});
+  maybeStartMP();
+}
+function maybeStartMP(){
+  if(MP.ready && MP.remoteReady && MP.isHost){
+    sendMP({type:'start'});
+    beginMPCountdown();
+  }
+}
+function beginMPCountdown(){
+  STATE = 'MP_COUNTDOWN';
+  MP.countdownT = 3.0;
+}
+function checkMPBothFinal(){
+  if(MP.myFinal && MP.oppFinal){ STATE = 'MP_RESULT'; }
+}
+
+/* ---- overlay DOM helpers ---- */
+const mpOverlayEl = document.getElementById('mpOverlay');
+function syncOverlayRect(){
+  const stageRect = document.getElementById('stage').getBoundingClientRect();
+  const cRect = canvas.getBoundingClientRect();
+  mpOverlayEl.style.left = (cRect.left-stageRect.left)+'px';
+  mpOverlayEl.style.top = (cRect.top-stageRect.top)+'px';
+  mpOverlayEl.style.width = cRect.width+'px';
+  mpOverlayEl.style.height = cRect.height+'px';
+}
+window.addEventListener('resize', syncOverlayRect);
+function showOverlay(html){
+  syncOverlayRect();
+  mpOverlayEl.innerHTML = html;
+  mpOverlayEl.classList.add('show');
+}
+function hideOverlay(){
+  mpOverlayEl.classList.remove('show');
+  mpOverlayEl.innerHTML='';
+}
+function mpLoadingHTML(msg){
+  return '<div class="mpPanel"><h2>1:1 대결</h2><p>'+msg+'</p></div>';
+}
+function mpErrorHTML(msg){
+  return '<div class="mpPanel"><h2>오류</h2><p style="color:#ff5c5c">'+msg+'</p>'+
+    '<button class="btnGray" id="mpBackBtn">뒤로</button></div>';
+}
+function bindBack(){
+  const b = document.getElementById('mpBackBtn');
+  if(b) b.onclick = ()=>{ cleanupMP(); hideOverlay(); STATE='MP_MENU'; };
+}
+
+function showHostWaitOverlay(code, errMsg){
+  syncOverlayRect();
+  mpOverlayEl.innerHTML =
+    '<div class="mpPanel">' +
+      '<h2>방 만들기 (호스트)</h2>' +
+      '<p><span class="stepnum">①</span> 아래 코드 전체를 복사해서 카카오톡 등으로 상대방에게 보내주세요.</p>' +
+      '<textarea id="mpOfferCode" readonly onclick="this.select()"></textarea>' +
+      '<button class="btnPrimary" id="mpCopyBtn">코드 복사하기</button>' +
+      '<div class="status" id="mpCopyStatus"></div>' +
+      '<p style="margin-top:10px"><span class="stepnum">②</span> 상대방이 보내온 응답 코드를 아래에 붙여넣으세요.</p>' +
+      '<textarea id="mpAnswerInput" placeholder="여기에 응답 코드를 붙여넣으세요"></textarea>' +
+      (errMsg? '<div class="status" style="color:#ff5c5c">'+errMsg+'</div>' : '') +
+      '<button class="btnOrange" id="mpConnectBtn">연결하기</button>' +
+      '<button class="btnGray" id="mpBackBtn">취소</button>' +
+    '</div>';
+  const ta = document.getElementById('mpOfferCode');
+  if(code){ ta.value = code; }
+  document.getElementById('mpCopyBtn').onclick = ()=>{ copyToClipboard(ta.value, 'mpCopyStatus'); };
+  document.getElementById('mpConnectBtn').onclick = ()=>{
+    const v = document.getElementById('mpAnswerInput').value.trim();
+    if(v) submitHostAnswer(v);
+  };
+  bindBack();
+  mpOverlayEl.classList.add('show');
+}
+
+function showJoinEnterOverlay(errMsg){
+  syncOverlayRect();
+  mpOverlayEl.innerHTML =
+    '<div class="mpPanel">' +
+      '<h2>코드로 참가하기</h2>' +
+      '<p>상대방에게 받은 연결 코드를 아래에 붙여넣어 주세요.</p>' +
+      '<textarea id="mpOfferInput" placeholder="여기에 코드를 붙여넣으세요"></textarea>' +
+      (errMsg? '<div class="status" style="color:#ff5c5c">'+errMsg+'</div>' : '') +
+      '<button class="btnPrimary" id="mpJoinBtn">확인</button>' +
+      '<button class="btnGray" id="mpBackBtn">취소</button>' +
+    '</div>';
+  document.getElementById('mpJoinBtn').onclick = ()=>{
+    const v = document.getElementById('mpOfferInput').value.trim();
+    if(v) submitJoinOffer(v);
+  };
+  bindBack();
+  mpOverlayEl.classList.add('show');
+}
+
+function showJoinWaitOverlay(code){
+  syncOverlayRect();
+  mpOverlayEl.innerHTML =
+    '<div class="mpPanel">' +
+      '<h2>응답 코드 전송</h2>' +
+      '<p>아래 코드 전체를 복사해서 상대방에게 다시 보내주세요. 상대방이 코드를 입력하면 자동으로 연결됩니다.</p>' +
+      '<textarea id="mpAnswerCode" readonly onclick="this.select()"></textarea>' +
+      '<button class="btnPrimary" id="mpCopyBtn">코드 복사하기</button>' +
+      '<div class="status" id="mpCopyStatus">연결 대기 중...</div>' +
+      '<button class="btnGray" id="mpBackBtn">취소</button>' +
+    '</div>';
+  document.getElementById('mpAnswerCode').value = code;
+  document.getElementById('mpCopyBtn').onclick = ()=>{ copyToClipboard(code, 'mpCopyStatus'); };
+  bindBack();
+  mpOverlayEl.classList.add('show');
+}
+
+function copyToClipboard(text, statusId){
+  const el = document.getElementById(statusId);
+  const done = ()=>{ if(el){ el.textContent='복사되었습니다!'; el.style.color='#4dff88'; } };
+  const fail = ()=>{ if(el){ el.textContent='자동 복사 실패 — 코드 상자를 눌러 전체 선택 후 직접 복사해주세요.'; el.style.color='#ff8a2b'; } };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(fail);
+  } else fail();
+}
+
+/* ---------------- Input handling ---------------- */
+window.addEventListener('keydown', e=>{
+  if(e.target && (e.target.tagName==='TEXTAREA' || e.target.tagName==='INPUT')) return;
+  Audio_.unlock();
+  const k = e.key.toLowerCase();
+  input.keys[k] = true;
+  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
+  if((k===' '||k==='z'||k==='j') && !input._actionHeldKey){ input.actionEdge = true; input._actionHeldKey = true; }
+  if((k==='shift'||k==='x'||k==='k') && !input._specialHeldKey){ input.specialEdge = true; input._specialHeldKey = true; }
+  if(STATE!=='PLAYING' && STATE!=='MP_PLAYING'){
+    if(k==='enter' || k===' '){ handleMenuAdvance(); }
+    if(STATE==='SELECT'||STATE==='MP_SELECT'){
+      if(k==='arrowleft') { selectedCharIdx = (selectedCharIdx+CHARACTERS.length-1)%CHARACTERS.length; Audio_.click(); }
+      if(k==='arrowright'){ selectedCharIdx = (selectedCharIdx+1)%CHARACTERS.length; Audio_.click(); }
+    }
+  }
+});
+window.addEventListener('keyup', e=>{
+  if(e.target && (e.target.tagName==='TEXTAREA' || e.target.tagName==='INPUT')) return;
+  const k = e.key.toLowerCase();
+  input.keys[k] = false;
+  if(k===' '||k==='z'||k==='j') input._actionHeldKey = false;
+  if(k==='shift'||k==='x'||k==='k') input._specialHeldKey = false;
+});
+
+function updateMoveFromKeys(){
+  let mx=0,my=0;
+  if(input.keys['arrowleft']||input.keys['a']) mx-=1;
+  if(input.keys['arrowright']||input.keys['d']) mx+=1;
+  if(input.keys['arrowup']||input.keys['w']) my-=1;
+  if(input.keys['arrowdown']||input.keys['s']) my+=1;
+  if(input.joy.active){ mx += input.joy.dx; my += input.joy.dy; }
+  const len = Math.hypot(mx,my);
+  if(len>1){ mx/=len; my/=len; }
+  input.moveX = mx; input.moveY = my;
+}
+
+/* Pointer handling: unified for mouse + touch */
+const activePointers = {};
+canvas.addEventListener('pointerdown', e=>{
+  Audio_.unlock();
+  canvas.setPointerCapture(e.pointerId);
+  const p = toLogical(e.clientX, e.clientY);
+  activePointers[e.pointerId] = p;
+
+  if(STATE==='MENU'){ handleMenuClick(p); return; }
+  if(STATE==='SELECT'){ handleSelectClick(p); return; }
+  if(STATE==='RESULT'){ handleResultClick(p); return; }
+  if(STATE==='MP_MENU'){ handleMPMenuClick(p); return; }
+  if(STATE==='MP_SELECT'){ handleSelectClick(p); return; }
+  if(STATE==='MP_RESULT'){ handleMPResultClick(p); return; }
+
+  if(STATE==='PLAYING'||STATE==='MP_PLAYING'){
+    // Special button
+    if(dist(p.x,p.y,input.btnSpecial.x,input.btnSpecial.y) < input.btnSpecial.r+8){
+      input.specialEdge = true; input.btnSpecial.pressed = true; return;
+    }
+    // Action button
+    if(dist(p.x,p.y,input.btnAction.x,input.btnAction.y) < input.btnAction.r+10){
+      input.actionEdge = true; input.btnAction.pressed = true; return;
+    }
+    // Joystick zone (left half)
+    if(p.x < BASE_W*0.5){
+      input.joy.active = true; input.joy.id = e.pointerId;
+      input.joy.baseX = p.x; input.joy.baseY = p.y;
+      input.joy.knobX = p.x; input.joy.knobY = p.y;
+      input.joy.dx = 0; input.joy.dy = 0;
+    }
+  }
+});
+canvas.addEventListener('pointermove', e=>{
+  if(!activePointers[e.pointerId]) return;
+  const p = toLogical(e.clientX, e.clientY);
+  activePointers[e.pointerId] = p;
+  if(input.joy.active && input.joy.id===e.pointerId){
+    let dx = p.x - input.joy.baseX, dy = p.y - input.joy.baseY;
+    const maxR = 46;
+    const len = Math.hypot(dx,dy);
+    if(len>maxR){ dx = dx/len*maxR; dy = dy/len*maxR; }
+    input.joy.knobX = input.joy.baseX+dx;
+    input.joy.knobY = input.joy.baseY+dy;
+    input.joy.dx = dx/maxR; input.joy.dy = dy/maxR;
+  }
+});
+function releasePointer(e){
+  delete activePointers[e.pointerId];
+  if(input.joy.id===e.pointerId){
+    input.joy.active=false; input.joy.id=null; input.joy.dx=0; input.joy.dy=0;
+  }
+  input.btnAction.pressed=false;
+  input.btnSpecial.pressed=false;
+}
+canvas.addEventListener('pointerup', releasePointer);
+canvas.addEventListener('pointercancel', releasePointer);
+
+/* ---------------- Menu / Select / Result click logic ---------------- */
+function handleMenuAdvance(){
+  if(STATE==='MENU'){ STATE='SELECT'; Audio_.click(); }
+}
+function handleMenuClick(p){
+  if(p.x>=BASE_W/2-220 && p.x<=BASE_W/2+220 && p.y>=390 && p.y<=450){ STATE='SELECT'; Audio_.click(); return; }
+  if(p.x>=BASE_W/2-220 && p.x<=BASE_W/2+220 && p.y>=460 && p.y<=520){ STATE='MP_MENU'; Audio_.click(); return; }
+}
+function handleSelectClick(p){
+  const cols=3, cardW=284, cardH=168, gap=14;
+  const gridW = cols*cardW+(cols-1)*gap;
+  const startX = (BASE_W-gridW)/2, y0=64;
+  for(let i=0;i<CHARACTERS.length;i++){
+    const col = i%cols, row = Math.floor(i/cols);
+    const x0 = startX + col*(cardW+gap);
+    const y00 = y0 + row*(cardH+gap);
+    if(p.x>=x0 && p.x<=x0+cardW && p.y>=y00 && p.y<=y00+cardH){
+      if(selectedCharIdx!==i){ selectedCharIdx = i; Audio_.click(); Audio_.teamJingle(CHARACTERS[i].id); }
+    }
+  }
+  // start button
+  if(p.x>=BASE_W/2-90 && p.x<=BASE_W/2+90 && p.y>=470 && p.y<=515){
+    if(MPACTIVE){
+      if(!MP.ready){ Audio_.click(); confirmMPReady(); }
+    } else {
+      startGame();
+    }
+  }
+}
+function handleResultClick(p){
+  if(p.x>=BASE_W/2-190 && p.x<=BASE_W/2-10 && p.y>=420 && p.y<=470){
+    startGame(); // retry same char
+  }
+  if(p.x>=BASE_W/2+10 && p.x<=BASE_W/2+190 && p.y>=420 && p.y<=470){
+    STATE='SELECT'; Audio_.click();
+  }
+}
+function startGame(){
+  Audio_.click();
+  newGameSession(selectedCharIdx);
+  STATE='PLAYING';
+}
+
+/* ---------------- Game update ---------------- */
+function updatePlaying(dt){
+  updateMoveFromKeys();
+  game.timeLeft -= dt;
+  game.difficultyT += dt;
+  if(game.timeLeft<=0){
+    game.timeLeft=0;
+    endGame();
+    return;
+  }
+
+  const c = player.char;
+  const spd = 90 + c.speed*17;
+  player.x = clamp(player.x + input.moveX*spd*dt, COURT.xMin, COURT.xMax);
+  player.y = clamp(player.y + input.moveY*spd*dt, COURT.yMin, COURT.yMax);
+  if(input.moveX!==0) player.facing = input.moveX>0?1:-1;
+  player.animT += dt*(1+Math.hypot(input.moveX,input.moveY)*3);
+
+  // Defender AI: try to stay between player and hoop, with slight lead + ramped speed
+  const defSpeed = defender.speed + Math.min(60, game.difficultyT*1.1);
+  const targetX = lerp(player.x, HOOP.x, 0.42);
+  const targetY = lerp(player.y, HOOP.y, 0.42) + Math.sin(game.difficultyT*1.3)*10;
+  const ddx = targetX-defender.x, ddy = targetY-defender.y;
+  const dlen = Math.hypot(ddx,ddy)||1;
+  defender.x = clamp(defender.x + ddx/dlen*defSpeed*dt, COURT.xMin+40, COURT.xMax);
+  defender.y = clamp(defender.y + ddy/dlen*defSpeed*dt, COURT.yMin, COURT.yMax);
+
+  // Ball logic
+  if(ball.state==='held'){
+    ball.x = player.x + player.facing*18;
+    ball.y = player.y - 10;
+    if(input.actionEdge){ attemptShot(); }
+    if(input.specialEdge){ attemptSpecial(); }
+  } else if(ball.state==='shot' || ball.state==='special'){
+    ball.t += dt;
+    const p = clamp(ball.t/ball.dur, 0, 1);
+    ball.x = lerp(ball.startX, ball.targetX, p);
+    const arcH = ball.isSpecial ? 170 : (ball.isDunk? 60 : 130);
+    ball.y = lerp(ball.startY, ball.targetY, p) - Math.sin(p*Math.PI)*arcH;
+    if(p>=1){
+      resolveShot();
+    }
+  } else if(ball.state==='loose'){
+    ball.respawnT -= dt;
+    ball.y += 300*dt;
+    if(ball.respawnT<=0){
+      ball.state='held';
+    }
+  }
+
+  if(game.specialCooldown>0) game.specialCooldown -= dt;
+
+  input.actionEdge=false; input.specialEdge=false;
+
+  updateParticles(dt);
+  updatePopups(dt);
+  if(shake>0) shake = Math.max(0, shake-dt*3);
+
+  if(game.isMP){
+    const now = performance.now();
+    if(game._lastSentScore!==game.score || (now-game._lastSendT)>800){
+      sendMP({type:'score', value:game.score, timeLeft:game.timeLeft});
+      game._lastSentScore = game.score; game._lastSendT = now;
+    }
+  }
+}
+
+function attemptShot(){
+  if(ball.state!=='held') return;
+  const c = player.char;
+  const dHoop = dist(player.x,player.y,HOOP.x,HOOP.y);
+  const dDef = dist(player.x,player.y,defender.x,defender.y);
+  const isDunk = dHoop < DUNK_DIST;
+  const isThree = !isDunk && player.x < THREE_PT_X;
+
+  const resist = 1-(c.contestResist||0);
+  let chance;
+  if(isDunk){
+    chance = 0.80 + c.power*0.018 - (dDef<70?0.28*resist:0);
+  } else {
+    const distFactor = clamp((dHoop-DUNK_DIST)/380, 0, 1);
+    chance = 0.86 - distFactor*0.32 + c.shoot*0.02 - (dDef<80?0.24*resist:0);
+  }
+  chance = clamp(chance, 0.08, 0.97);
+
+  ball.state='shot';
+  ball.t=0; ball.dur = isDunk?0.35:(isThree?0.85:0.65);
+  ball.startX=player.x+player.facing*18; ball.startY=player.y-10;
+  ball.targetX=HOOP.x; ball.targetY=HOOP.y;
+  ball.isDunk=isDunk; ball.isThree=isThree; ball.isSpecial=false;
+  ball.success = Math.random()<chance;
+  ball.points = isDunk? (2 + (c.power>=8?1:0)) : (isThree?3:2);
+
+  player.jumping = (isDunk); player.jumpT = 0;
+}
+
+function attemptSpecial(){
+  if(!game.feverReady || ball.state!=='held' || game.specialCooldown>0) return;
+  const c = player.char;
+  ball.state='special';
+  ball.t=0; ball.dur=0.7;
+  ball.startX=player.x+player.facing*18; ball.startY=player.y-10;
+  ball.targetX=HOOP.x; ball.targetY=HOOP.y;
+  ball.isDunk=true; ball.isThree=false; ball.isSpecial=true;
+  ball.success = true;
+  ball.points = 8;
+  player.jumping = true; player.jumpT=0;
+  game.fever = 0; game.feverReady=false;
+  game.specialCooldown = 1.0;
+  spawnPopup(player.x, player.y-50, c.special+'!', c.color, true);
+}
+
+function resolveShot(){
+  const c = player.char;
+  if(ball.success){
+    const mult = game.combo;
+    const pts = ball.points*mult;
+    game.score += pts;
+    game.combo = Math.min(game.combo+1, 6+(c.comboCapBonus||0));
+    game.bestCombo = Math.max(game.bestCombo, game.combo);
+    game.makes++;
+    if(ball.isDunk) game.dunks++;
+    const feverGain = (ball.isSpecial?0:(ball.isDunk?26:(ball.isThree?30:20))) * (c.feverMult||1);
+    game.fever = Math.min(100, game.fever + feverGain);
+    if(game.fever>=100) game.feverReady = true;
+
+    spawnParticles(HOOP.x, HOOP.y, c.color, ball.isDunk?26:16, ball.isDunk?170:110);
+    spawnPopup(HOOP.x-10, HOOP.y-20, '+'+pts + (mult>1?('  COMBO x'+mult):''), '#ffe66d', ball.isSpecial||ball.isDunk);
+    if(mult>1) Audio_.combo(mult);
+    if(ball.isSpecial){ Audio_.special(); shake=1; }
+    else if(ball.isDunk){ Audio_.dunk(); shake=0.6; }
+    else if(ball.isThree){ Audio_.score3(); }
+    else Audio_.score2();
+  } else {
+    game.combo = 1;
+    game.misses++;
+    Audio_.miss();
+    spawnPopup(HOOP.x-20, HOOP.y-10, 'MISS', '#ff5c5c', false);
+    spawnParticles(HOOP.x, HOOP.y, '#888', 8, 80);
+  }
+  ball.state='loose';
+  ball.respawnT=0.45;
+  ball.x = HOOP.x; ball.y = HOOP.y;
+  player.jumping=false;
+}
+
+function updateParticles(dt){
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.t += dt;
+    if(p.t>p.life){ particles.splice(i,1); continue; }
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    p.vy += 260*dt;
+  }
+}
+function updatePopups(dt){
+  for(let i=popups.length-1;i>=0;i--){
+    const q = popups[i];
+    q.t += dt;
+    q.y -= 24*dt;
+    if(q.t>q.life) popups.splice(i,1);
+  }
+}
+
+function endGame(){
+  game.ended = true;
+  Audio_.buzzer();
+  if(game.isMP){
+    MP.myFinal = { score:game.score, bestCombo:game.bestCombo, dunks:game.dunks };
+    sendMP({type:'final', value:game.score, bestCombo:game.bestCombo, dunks:game.dunks});
+    STATE = MP.oppFinal ? 'MP_RESULT' : 'MP_WAIT_RESULT';
+    MP._waitStart = performance.now();
+  } else {
+    STATE = 'RESULT';
+  }
+}
+
+/* ---------------- Rendering ---------------- */
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.arcTo(x+w, y, x+w, y+r, r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x+r, y+h);
+  ctx.arcTo(x, y+h, x, y+h-r, r);
+  ctx.lineTo(x, y+r);
+  ctx.arcTo(x, y, x+r, y, r);
+  ctx.closePath();
+}
+
+function drawGroundShadow(x,y,r,color){
+  ctx.save();
+  ctx.globalAlpha=0.55;
+  ctx.fillStyle=color;
+  ctx.beginPath();
+  ctx.ellipse(x,y+21,r,r*0.32,0,0,Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/* 코트 연출: 참고 영상(m.youtube.com/watch?v=GMnRPzkSdzw)에서 확인한
+   "관중석 + 파란 아웃오브바운드 테두리 + 살짝 기울어진(3/4 부감) 코트" 룩을 반영 */
+function drawCourt(){
+  ctx.fillStyle = '#07101f';
+  ctx.fillRect(0,0,BASE_W,BASE_H);
+
+  // 관중석(크라우드) 배경
+  const crowdY0 = 18, crowdY1 = COURT.yMin-16;
+  ctx.fillStyle = '#101c34';
+  ctx.fillRect(0, crowdY0, BASE_W, crowdY1-crowdY0);
+  const crowdColors = ['#ff8a2b','#29e0ff','#b26bff','#4dff88','#ffe66d','#ff5c5c','#8a93ad'];
+  for(let row=0; row<3; row++){
+    const ry = crowdY0+9+row*10;
+    for(let cxp=8; cxp<BASE_W; cxp+=13){
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = crowdColors[Math.floor(cxp/13+row*3)%crowdColors.length];
+      ctx.beginPath();
+      ctx.arc(cxp+(row%2)*5, ry, 3.2, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha=1;
+  ctx.fillStyle = '#ff5c5c'; ctx.fillRect(0, crowdY1, BASE_W, 5);
+  ctx.fillStyle = '#8a2020'; ctx.fillRect(0, crowdY1+5, BASE_W, 4);
+
+  // 살짝 기울어진(원근감) 코트 바닥 — 위쪽(먼 쪽)이 좁고 아래쪽(가까운 쪽)이 넓은 사다리꼴
+  const inset = 40;
+  const fx0 = COURT.xMin-15, fx1 = COURT.xMax+205;
+  const nx0 = fx0+inset, nx1 = fx1-inset;
+  const yTop = COURT.yMin-15, yBot = COURT.yMax+15;
+
+  ctx.fillStyle = '#c98a4b';
+  ctx.beginPath();
+  ctx.moveTo(nx0,yTop); ctx.lineTo(nx1,yTop); ctx.lineTo(fx1,yBot); ctx.lineTo(fx0,yBot);
+  ctx.closePath(); ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(nx0,yTop); ctx.lineTo(nx1,yTop); ctx.lineTo(fx1,yBot); ctx.lineTo(fx0,yBot);
+  ctx.closePath(); ctx.clip();
+  ctx.strokeStyle='rgba(255,255,255,0.07)'; ctx.lineWidth=1;
+  for(let i=1;i<12;i++){
+    const yy = yTop + (yBot-yTop)*i/12;
+    ctx.beginPath(); ctx.moveTo(0,yy); ctx.lineTo(BASE_W,yy); ctx.stroke();
+  }
+  // 골대 근처 파란색 페인트(키) 구역
+  ctx.fillStyle='rgba(41,111,214,0.28)';
+  ctx.fillRect(HOOP.x-140, yTop, 220, yBot-yTop);
+  ctx.restore();
+
+  // 파란색 아웃오브바운드 테두리
+  ctx.beginPath();
+  ctx.moveTo(nx0,yTop); ctx.lineTo(nx1,yTop); ctx.lineTo(fx1,yBot); ctx.lineTo(fx0,yBot); ctx.closePath();
+  ctx.strokeStyle = '#2a6fd6'; ctx.lineWidth = 9; ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=2; ctx.stroke();
+
+  // 코트 라인
+  ctx.beginPath();
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=2;
+  ctx.arc(HOOP.x, HOOP.y+90, 300, Math.PI*0.62, Math.PI*1.42);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(COURT.xMin+60, (COURT.yMin+COURT.yMax)/2, 38, 0, Math.PI*2);
+  ctx.strokeStyle='rgba(255,255,255,0.18)';
+  ctx.stroke();
+
+  // backboard + hoop
+  ctx.fillStyle='#333c5c';
+  ctx.fillRect(BACKBOARD_X+8, HOOP.y-45, 8, 260);
+  ctx.fillStyle='#eef1fb';
+  ctx.fillRect(BACKBOARD_X, HOOP.y-45, 8, 90);
+  ctx.strokeStyle='#ff5c5c'; ctx.lineWidth=3;
+  ctx.strokeRect(BACKBOARD_X-2, HOOP.y-18, 12, 16);
+  ctx.beginPath();
+  ctx.ellipse(HOOP.x-15, HOOP.y, 22, 7, 0, 0, Math.PI*2);
+  ctx.strokeStyle='#ff8a2b'; ctx.lineWidth=4;
+  ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.lineWidth=1;
+  for(let i=-2;i<=2;i++){
+    ctx.beginPath();
+    ctx.moveTo(HOOP.x-15+i*8, HOOP.y+2);
+    ctx.lineTo(HOOP.x-15+i*4, HOOP.y+22);
+    ctx.stroke();
+  }
+}
+
+/* 캐릭터 비례: 참고 영상의 "미니어처(치비)" 스타일 — 머리를 크게, 몸통/팔다리를 짧게 */
+function drawCharacter(x,y,c,facing,animT,jumping,jumpProgress,isDefenderSkin){
+  ctx.save();
+  ctx.translate(x,y);
+  let hop = jumping ? -Math.sin(jumpProgress*Math.PI)*46 : Math.abs(Math.sin(animT*6))*3;
+  ctx.translate(0,-hop);
+  ctx.scale(facing,1);
+
+  const body = isDefenderSkin ? '#555f7a' : c.color;
+  const dark = isDefenderSkin ? '#333a4d' : c.dark;
+  const legSwing = jumping? 5 : Math.sin(animT*6)*7;
+
+  // 신발 (통통한 스니커즈)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.ellipse(-7, 20+legSwing*0.15, 6, 3.4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(5, 20-legSwing*0.15, 6, 3.4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = dark;
+  ctx.beginPath(); ctx.ellipse(-7, 21.5+legSwing*0.15, 6, 2, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(5, 21.5-legSwing*0.15, 6, 2, 0, 0, Math.PI*2); ctx.fill();
+
+  // 다리 (짧게)
+  ctx.fillStyle = dark;
+  ctx.fillRect(-9, 6, 7, 14+legSwing*0.15);
+  ctx.fillRect(2, 6, 7, 14-legSwing*0.15);
+
+  // 몸통 / 유니폼 (짧게)
+  ctx.fillStyle = body;
+  ctx.beginPath();
+  ctx.moveTo(-14,-10);
+  ctx.lineTo(14,-10);
+  ctx.lineTo(12,8);
+  ctx.lineTo(-12,8);
+  ctx.closePath();
+  ctx.fill();
+
+  // 등번호
+  if(c.number){
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    ctx.font='bold 8px Arial';
+    ctx.textAlign='center';
+    ctx.save(); ctx.scale(facing,1);
+    ctx.fillText(c.number, 0, 2);
+    ctx.restore();
+  }
+
+  // 팔 (짧게)
+  ctx.fillStyle = dark;
+  const armUp = jumping ? -18 : -4;
+  ctx.fillRect(10, armUp, 6, 13);
+  ctx.fillRect(-16, -4, 6, 11);
+
+  // 머리 (크게 — 치비 비율의 핵심)
+  ctx.fillStyle = '#f2c49b';
+  ctx.beginPath();
+  ctx.arc(0,-20,14,0,Math.PI*2);
+  ctx.fill();
+  // 간단한 얼굴 포인트
+  if(!isDefenderSkin){
+    ctx.fillStyle='rgba(50,35,25,0.75)';
+    ctx.beginPath(); ctx.arc(5,-21,1.3,0,Math.PI*2); ctx.fill();
+  }
+
+  // 헤어스타일 (전부 독자 디자인, 큰 머리에 맞게 확대)
+  ctx.fillStyle = c.hair || '#222';
+  if(c.hairStyle==='mohawk'){
+    ctx.beginPath();
+    ctx.moveTo(-3,-36); ctx.lineTo(3,-36); ctx.lineTo(2,-30); ctx.lineTo(-2,-30);
+    ctx.fill();
+    ctx.fillRect(-12,-32,24,7);
+  } else if(c.hairStyle==='bald'){
+    ctx.beginPath();
+    ctx.arc(0,-24,14,Math.PI,Math.PI*2);
+    ctx.fill();
+  } else if(c.hairStyle==='ponytail'){
+    ctx.beginPath();
+    ctx.arc(0,-27,14,Math.PI*0.9,Math.PI*1.9);
+    ctx.fill();
+    ctx.fillRect(-18,-27,7,17);
+  } else if(c.hairStyle==='bob'){
+    ctx.beginPath();
+    ctx.arc(0,-23,15,Math.PI*0.85,Math.PI*2.15);
+    ctx.fill();
+  } else if(c.hairStyle==='flattop'){
+    ctx.fillRect(-13,-33,26,9);
+  } else if(c.hairStyle==='spiky'){
+    for(let i=-2;i<=2;i++){
+      ctx.beginPath();
+      ctx.moveTo(i*5-2,-30); ctx.lineTo(i*5+2,-30); ctx.lineTo(i*5,-39);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawBall(){
+  ctx.save();
+  if(ball.state==='held'){
+    ctx.globalAlpha=0.35;
+    ctx.fillStyle='#ff8a2b';
+    ctx.beginPath(); ctx.ellipse(ball.x, ball.y+16, 10, 3.5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha=1;
+  }
+  ctx.translate(ball.x,ball.y);
+  ctx.fillStyle='#ff8a2b';
+  ctx.beginPath(); ctx.arc(0,0,7,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#2a1400'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(-7,0); ctx.lineTo(7,0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-7); ctx.lineTo(0,7); ctx.stroke();
+  ctx.restore();
+}
+
+function drawParticles(){
+  for(const p of particles){
+    const a = 1-p.t/p.life;
+    ctx.globalAlpha = Math.max(0,a);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size);
+  }
+  ctx.globalAlpha=1;
+}
+function drawPopups(){
+  for(const q of popups){
+    const a = 1-q.t/q.life;
+    ctx.globalAlpha = Math.max(0,a);
+    ctx.fillStyle=q.color;
+    ctx.font = (q.big? 'bold 22px' : 'bold 15px') + ' Arial';
+    ctx.textAlign='center';
+    ctx.fillText(q.text, q.x, q.y);
+    ctx.globalAlpha=1;
+  }
+}
+
+/* 상단 HUD: 참고 영상의 "스코어보드 배지형 바" 스타일 반영 */
+function drawHUD(){
+  ctx.fillStyle='rgba(8,12,26,0.55)';
+  ctx.fillRect(0,0,BASE_W,58);
+  ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,58); ctx.lineTo(BASE_W,58); ctx.stroke();
+
+  // 스코어 배지
+  roundRect(14,8,150,32,8);
+  ctx.fillStyle='rgba(41,224,255,0.18)'; ctx.fill();
+  ctx.strokeStyle='#29e0ff'; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='bold 18px Arial'; ctx.textAlign='left';
+  ctx.fillText('SCORE '+game.score, 24, 30);
+
+  if(game.isMP){
+    ctx.font='bold 12px Arial'; ctx.fillStyle='#ff8a2b'; ctx.textAlign='left';
+    ctx.fillText('상대 '+MP.oppScore+'점'+(MP.disconnected?' (연결끊김)':''), 24, 52);
+  }
+
+  // 타이머 배지 (중앙)
+  const t = Math.ceil(game.timeLeft);
+  roundRect(BASE_W/2-46,6,92,36,10);
+  ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fill();
+  ctx.strokeStyle= t<=10? '#ff5c5c':'rgba(255,255,255,0.35)'; ctx.lineWidth=2; ctx.stroke();
+  ctx.textAlign='center';
+  ctx.fillStyle = t<=10 ? '#ff5c5c' : '#fff';
+  ctx.font='bold 24px Arial';
+  ctx.fillText(t + 's', BASE_W/2, 32);
+
+  // 콤보 배지
+  roundRect(BASE_W-164,8,150,32,8);
+  ctx.fillStyle='rgba(255,230,109,0.15)'; ctx.fill();
+  ctx.strokeStyle='#ffe66d'; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.textAlign='right';
+  ctx.fillStyle='#ffe66d';
+  ctx.font='bold 17px Arial';
+  ctx.fillText('COMBO x'+game.combo, BASE_W-24, 30);
+
+  // fever gauge
+  const gw=220, gh=12, gx=BASE_W/2-gw/2, gy=66;
+  roundRect(gx,gy,gw,gh,6);
+  ctx.fillStyle='rgba(255,255,255,0.15)'; ctx.fill();
+  ctx.save();
+  roundRect(gx,gy,gw,gh,6); ctx.clip();
+  ctx.fillStyle = game.feverReady ? '#ff5c5c' : '#29e0ff';
+  ctx.fillRect(gx,gy,gw*(game.fever/100),gh);
+  ctx.restore();
+  roundRect(gx,gy,gw,gh,6);
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1; ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='bold 10px Arial'; ctx.textAlign='center';
+  ctx.fillText(game.feverReady? 'SPECIAL 준비완료! (SHIFT/버튼)' : 'FEVER', BASE_W/2, gy+10);
+}
+
+function drawTouchControls(){
+  const j = input.joy;
+  ctx.globalAlpha=0.5;
+  ctx.beginPath(); ctx.arc(j.active?j.baseX:100, j.active?j.baseY:BASE_H-100, 50, 0, Math.PI*2);
+  ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(j.active?j.knobX:100, j.active?j.knobY:BASE_H-100, 22,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,255,255,0.35)'; ctx.fill();
+
+  const a = input.btnAction;
+  ctx.beginPath(); ctx.arc(a.x,a.y,a.r,0,Math.PI*2);
+  ctx.fillStyle= a.pressed? 'rgba(255,80,80,0.75)':'rgba(220,50,50,0.55)'; ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='bold 13px Arial'; ctx.textAlign='center';
+  ctx.fillText('SHOT/', a.x, a.y-2); ctx.fillText('DUNK', a.x, a.y+12);
+
+  const s = input.btnSpecial;
+  ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,Math.PI*2);
+  ctx.fillStyle = game.feverReady ? (s.pressed?'rgba(77,255,136,0.8)':'rgba(77,255,136,0.55)') : 'rgba(120,120,120,0.25)';
+  ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='bold 11px Arial';
+  ctx.fillText('SP', s.x, s.y+4);
+  ctx.globalAlpha=1;
+}
+
+function renderPlaying(){
+  ctx.save();
+  if(shake>0){
+    ctx.translate(rand(-1,1)*shake*8, rand(-1,1)*shake*8);
+  }
+  drawCourt();
+  // 공을 든 선수 발밑에 초록색 링(참고 영상의 볼 핸들러 표시) + 나머지는 은은한 그림자
+  drawGroundShadow(defender.x, defender.y, 14, 'rgba(0,0,0,0.5)');
+  drawGroundShadow(player.x, player.y, 17, '#4dff88');
+  // draw order by y (simple depth)
+  const jp = player.jumping ? clamp(ball.t/(ball.dur||1),0,1) : 0;
+  const entities = [
+    {y:defender.y, draw:()=>drawCharacter(defender.x,defender.y,{color:'#8a93ad',dark:'#555f7a',hair:'#222',hairStyle:'bald',number:''}, defender.x<HOOP.x?1:-1, 0,false,0,true)},
+    {y:player.y, draw:()=>drawCharacter(player.x,player.y,player.char,player.facing,player.animT,player.jumping,jp,false)}
+  ];
+  entities.sort((a,b)=>a.y-b.y).forEach(e=>e.draw());
+  drawBall();
+  drawParticles();
+  drawPopups();
+  ctx.restore();
+  drawHUD();
+  drawTouchControls();
+}
+
+/* ---------------- Menu screens ---------------- */
+function renderMenu(t){
+  ctx.fillStyle='#070a18';
+  ctx.fillRect(0,0,BASE_W,BASE_H);
+  // decorative court lines
+  ctx.strokeStyle='rgba(41,224,255,0.15)'; ctx.lineWidth=2;
+  for(let i=0;i<6;i++){
+    ctx.beginPath(); ctx.arc(BASE_W/2,BASE_H/2,80+i*40,0,Math.PI*2); ctx.stroke();
+  }
+  const bob = Math.sin(t*2)*6;
+  ctx.textAlign='center';
+  ctx.fillStyle='#29e0ff';
+  ctx.font='bold 68px Arial';
+  ctx.fillText('DUNK RUSH', BASE_W/2, 210+bob);
+  ctx.fillStyle='#ff8a2b';
+  ctx.font='bold 40px Arial';
+  ctx.fillText('ARENA', BASE_W/2, 260+bob);
+
+  ctx.fillStyle='#9fb3d9';
+  ctx.font='16px Arial';
+  ctx.fillText('90초 안에 최대한 많이 득점하라! 콤보, 피버, 스페셜 덩크로 하이스코어에 도전!', BASE_W/2, 330);
+
+  ctx.fillStyle='#29e0ff';
+  ctx.fillRect(BASE_W/2-220,390,440,60);
+  ctx.fillStyle='#000'; ctx.font='bold 22px Arial';
+  ctx.fillText('혼자 하기 (SOLO)', BASE_W/2, 428);
+
+  ctx.fillStyle='#ff8a2b';
+  ctx.fillRect(BASE_W/2-220,460,440,60);
+  ctx.fillStyle='#000'; ctx.font='bold 20px Arial';
+  ctx.fillText('1:1 대결 (같은 Wi-Fi, 두 기기)', BASE_W/2, 498);
+}
+
+function drawStatBar(x,y,label,val,max,color,barW){
+  barW = barW||90;
+  ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.font='9px Arial'; ctx.textAlign='left';
+  ctx.fillText(label, x, y);
+  ctx.fillStyle='rgba(255,255,255,0.15)';
+  ctx.fillRect(x+26,y-7,barW,7);
+  ctx.fillStyle=color;
+  ctx.fillRect(x+26,y-7,barW*(val/max),7);
+}
+
+/* 팀 선택 화면: 6개 팀을 3x2 그리드로 표시 */
+function renderSelect(){
+  ctx.fillStyle='#070a18';
+  ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.fillStyle='#fff';
+  ctx.font='bold 24px Arial';
+  ctx.textAlign='center';
+  ctx.fillText(MPACTIVE? '팀 선택 (1:1 대결)' : '팀 선택', BASE_W/2, 34);
+  ctx.fillStyle='#9fb3d9'; ctx.font='11px Arial';
+  ctx.fillText(MPACTIVE? '← → 로 선택 · 둘 다 준비되면 자동 시작' : '← → 로 선택 · START 클릭으로 시작', BASE_W/2, 52);
+
+  const cols=3, cardW=284, cardH=168, gap=14;
+  const gridW = cols*cardW+(cols-1)*gap;
+  const startX = (BASE_W-gridW)/2, y0=64;
+
+  CHARACTERS.forEach((c,i)=>{
+    const col = i%cols, row = Math.floor(i/cols);
+    const x0 = startX + col*(cardW+gap);
+    const y00 = y0 + row*(cardH+gap);
+    const selected = i===selectedCharIdx;
+
+    ctx.fillStyle = selected? 'rgba(41,224,255,0.15)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(x0,y00,cardW,cardH);
+    ctx.strokeStyle = selected? c.color : 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = selected?3:1;
+    ctx.strokeRect(x0,y00,cardW,cardH);
+
+    // 팀 컬러 헤더
+    ctx.globalAlpha=0.85; ctx.fillStyle=c.color;
+    ctx.fillRect(x0,y00,cardW,20);
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#000'; ctx.font='bold 11px Arial'; ctx.textAlign='left';
+    ctx.fillText(c.name, x0+7, y00+14);
+
+    // 미니 캐릭터
+    ctx.save();
+    ctx.translate(x0+48, y00+96);
+    ctx.scale(0.6,0.6);
+    drawCharacter(0,0,c,1,performance.now()/300,false,0,false);
+    ctx.restore();
+
+    ctx.fillStyle=c.color; ctx.font='bold 11px Arial'; ctx.textAlign='left';
+    ctx.fillText(c.role, x0+94, y00+38);
+    ctx.fillStyle='#9fb3d9'; ctx.font='9px Arial';
+    wrapText(c.concept||'', x0+94, y00+50, cardW-100, 10, 'left');
+
+    drawStatBar(x0+94, y00+66, 'SPD', c.speed, 10, '#29e0ff', 68);
+    drawStatBar(x0+94, y00+78, 'POW', c.power, 10, '#ff8a2b', 68);
+    drawStatBar(x0+94, y00+90, 'SHT', c.shoot, 10, '#b26bff', 68);
+    drawStatBar(x0+94, y00+102, 'JMP', c.jump, 10, '#4dff88', 68);
+
+    ctx.fillStyle='#ffe66d'; ctx.font='bold 9px Arial'; ctx.textAlign='left';
+    ctx.fillText('SP: '+c.special, x0+8, y00+124);
+    ctx.fillStyle='#9fb3d9'; ctx.font='8px Arial';
+    wrapText(c.specialDesc, x0+8, y00+136, cardW-16, 9, 'left');
+  });
+
+  // start button
+  const sel = CHARACTERS[selectedCharIdx];
+  ctx.fillStyle= MPACTIVE&&MP.ready ? 'rgba(255,255,255,0.2)' : sel.color;
+  ctx.fillRect(BASE_W/2-90,470,180,45);
+  ctx.fillStyle= MPACTIVE&&MP.ready ? '#9fb3d9' : '#000';
+  ctx.font='bold 20px Arial'; ctx.textAlign='center';
+  ctx.fillText(MPACTIVE ? (MP.ready?'준비완료':'준비하기') : 'START', BASE_W/2, 498);
+
+  if(MPACTIVE){
+    ctx.font='bold 13px Arial';
+    ctx.fillStyle = MP.remoteReady ? '#4dff88' : '#9fb3d9';
+    ctx.fillText(MP.remoteReady? '상대방 준비완료 ✓' : (MP.disconnected? '상대방과 연결이 끊어졌습니다' : '상대방 대기 중...'), BASE_W/2, 528);
+  }
+}
+
+function wrapText(text,x,y,maxW,lh,align){
+  align = align||'center';
+  const words = (text||'').split(' ');
+  let line='', yy=y;
+  ctx.textAlign=align;
+  for(const w of words){
+    const test = line+w+' ';
+    if(ctx.measureText(test).width>maxW && line){
+      ctx.fillText(line, x, yy); line=w+' '; yy+=lh;
+    } else line = test;
+  }
+  ctx.fillText(line, x, yy);
+}
+
+function renderResult(){
+  ctx.fillStyle='#070a18';
+  ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 34px Arial';
+  ctx.fillText('TIME UP!', BASE_W/2, 110);
+
+  let grade='C';
+  if(game.score>=120) grade='S';
+  else if(game.score>=80) grade='A';
+  else if(game.score>=45) grade='B';
+  const gcolor = {S:'#ffe66d',A:'#4dff88',B:'#29e0ff',C:'#b26bff'}[grade];
+  ctx.fillStyle=gcolor; ctx.font='bold 90px Arial';
+  ctx.fillText(grade, BASE_W/2, 230);
+
+  ctx.fillStyle='#fff'; ctx.font='bold 26px Arial';
+  ctx.fillText('FINAL SCORE  '+game.score, BASE_W/2, 280);
+
+  ctx.font='15px Arial'; ctx.fillStyle='#9fb3d9';
+  ctx.fillText('최고 콤보 x'+game.bestCombo+'   ·   덩크 '+game.dunks+'회   ·   성공 '+game.makes+' / 실패 '+game.misses, BASE_W/2, 315);
+
+  ctx.fillStyle='#29e0ff';
+  ctx.fillRect(BASE_W/2-190,420,180,50);
+  ctx.fillStyle='#000'; ctx.font='bold 18px Arial';
+  ctx.fillText('RETRY', BASE_W/2-100, 452);
+
+  ctx.fillStyle='#ff8a2b';
+  ctx.fillRect(BASE_W/2+10,420,180,50);
+  ctx.fillStyle='#000';
+  ctx.fillText('팀 변경', BASE_W/2+100, 452);
+}
+
+/* ---------------- Multiplayer screens ---------------- */
+function renderMPMenu(){
+  ctx.fillStyle='#070a18'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 28px Arial';
+  ctx.fillText('1:1 대결 (같은 Wi-Fi)', BASE_W/2, 90);
+  ctx.fillStyle='#9fb3d9'; ctx.font='14px Arial';
+  wrapText('같은 와이파이에 연결된 두 기기끼리 서버 없이 바로 연결됩니다. 한쪽이 방을 만들고, 다른 쪽이 코드를 입력해 참가하세요.', BASE_W/2, 130, 680, 20);
+
+  ctx.fillStyle='#29e0ff';
+  ctx.fillRect(BASE_W/2-220,220,440,70);
+  ctx.fillStyle='#000'; ctx.font='bold 22px Arial';
+  ctx.fillText('방 만들기 (호스트)', BASE_W/2, 262);
+
+  ctx.fillStyle='#ff8a2b';
+  ctx.fillRect(BASE_W/2-220,310,440,70);
+  ctx.fillStyle='#000';
+  ctx.fillText('코드로 참가하기', BASE_W/2, 352);
+
+  ctx.fillStyle='#5a6a8a';
+  ctx.fillRect(BASE_W/2-90,410,180,45);
+  ctx.fillStyle='#fff'; ctx.font='bold 16px Arial';
+  ctx.fillText('뒤로', BASE_W/2, 438);
+}
+function handleMPMenuClick(p){
+  if(p.x>=BASE_W/2-220 && p.x<=BASE_W/2+220 && p.y>=220 && p.y<=290){ Audio_.click(); startHostGame(); return; }
+  if(p.x>=BASE_W/2-220 && p.x<=BASE_W/2+220 && p.y>=310 && p.y<=380){ Audio_.click(); startJoinFlow(); return; }
+  if(p.x>=BASE_W/2-90 && p.x<=BASE_W/2+90 && p.y>=410 && p.y<=455){ Audio_.click(); STATE='MENU'; return; }
+}
+
+function renderMPCountdown(dt){
+  MP.countdownT -= dt;
+  ctx.fillStyle='#070a18'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  drawCourt();
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 20px Arial';
+  ctx.fillText('대결 시작!', BASE_W/2, 150);
+  const n = Math.ceil(MP.countdownT);
+  ctx.fillStyle='#ffe66d'; ctx.font='bold 140px Arial';
+  ctx.fillText(n>0? n : 'GO', BASE_W/2, 320);
+  if(MP.countdownT<=0){
+    newGameSession(selectedCharIdx);
+    game.isMP = true;
+    MP.oppScore=0; MP.myFinal=null; MP.oppFinal=null;
+    STATE='MP_PLAYING';
+    Audio_.click();
+  }
+}
+
+function renderMPWaitResult(){
+  ctx.fillStyle='#070a18'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 24px Arial';
+  ctx.fillText('TIME UP! 상대방 결과를 기다리는 중...', BASE_W/2, 250);
+  ctx.fillStyle='#9fb3d9'; ctx.font='16px Arial';
+  ctx.fillText('내 최종 점수: '+(MP.myFinal? MP.myFinal.score:0), BASE_W/2, 300);
+  if(MP.disconnected){
+    ctx.fillStyle='#ff5c5c'; ctx.font='14px Arial';
+    ctx.fillText('상대방과 연결이 끊어졌습니다. 잠시 후 결과가 표시됩니다.', BASE_W/2, 340);
+    if(performance.now()-MP._waitStart>4000 && !MP.oppFinal){
+      MP.oppFinal = { score:0, bestCombo:0, dunks:0, disconnected:true };
+      STATE='MP_RESULT';
+    }
+  }
+}
+
+function renderMPResult(){
+  ctx.fillStyle='#070a18'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.textAlign='center';
+  const my = MP.myFinal||{score:0,bestCombo:0,dunks:0};
+  const op = MP.oppFinal||{score:0,bestCombo:0,dunks:0};
+  let result = '무승부!', rcolor = '#b26bff';
+  if(my.score>op.score){ result='승리! 🏆'; rcolor='#4dff88'; }
+  else if(my.score<op.score){ result='패배...'; rcolor='#ff5c5c'; }
+
+  ctx.fillStyle=rcolor; ctx.font='bold 46px Arial';
+  ctx.fillText(result, BASE_W/2, 100);
+
+  ctx.fillStyle='#29e0ff'; ctx.font='bold 20px Arial';
+  ctx.fillText('나', BASE_W/2-160, 160);
+  ctx.fillStyle='#fff'; ctx.font='bold 54px Arial';
+  ctx.fillText(my.score, BASE_W/2-160, 220);
+  ctx.fillStyle='#9fb3d9'; ctx.font='12px Arial';
+  ctx.fillText('콤보 x'+my.bestCombo+' · 덩크 '+my.dunks, BASE_W/2-160, 245);
+
+  ctx.fillStyle='#fff'; ctx.font='bold 26px Arial';
+  ctx.fillText('VS', BASE_W/2, 200);
+
+  ctx.fillStyle='#ff8a2b'; ctx.font='bold 20px Arial';
+  ctx.fillText('상대방', BASE_W/2+160, 160);
+  ctx.fillStyle='#fff'; ctx.font='bold 54px Arial';
+  ctx.fillText(op.score, BASE_W/2+160, 220);
+  ctx.fillStyle='#9fb3d9'; ctx.font='12px Arial';
+  ctx.fillText('콤보 x'+op.bestCombo+' · 덩크 '+op.dunks, BASE_W/2+160, 245);
+
+  if(op.disconnected){
+    ctx.fillStyle='#ff5c5c'; ctx.font='12px Arial';
+    ctx.fillText('(연결 끊김 - 상대방 점수 미확인)', BASE_W/2, 270);
+  }
+
+  ctx.fillStyle='#29e0ff';
+  ctx.fillRect(BASE_W/2-190,420,180,50);
+  ctx.fillStyle='#000'; ctx.font='bold 16px Arial';
+  ctx.fillText('다시 대결', BASE_W/2-100, 452);
+
+  ctx.fillStyle='#5a6a8a';
+  ctx.fillRect(BASE_W/2+10,420,180,50);
+  ctx.fillStyle='#fff';
+  ctx.fillText('메인으로', BASE_W/2+100, 452);
+}
+function handleMPResultClick(p){
+  if(p.x>=BASE_W/2-190 && p.x<=BASE_W/2-10 && p.y>=420 && p.y<=470){
+    Audio_.click();
+    sendMP({type:'rematch'});
+    MP.ready=false; MP.remoteReady=false; MP.myFinal=null; MP.oppFinal=null;
+    STATE = MP.connected ? 'MP_SELECT' : 'MENU';
+    return;
+  }
+  if(p.x>=BASE_W/2+10 && p.x<=BASE_W/2+190 && p.y>=420 && p.y<=470){
+    cleanupMP(); hideOverlay(); STATE='MENU';
+  }
+}
+
+/* ---------------- Main loop ---------------- */
+function loop(now){
+  const dt = Math.min(0.033, (now-lastTime)/1000);
+  lastTime = now;
+  updateMusicForState();
+
+  if(STATE==='MENU') renderMenu(now/1000);
+  else if(STATE==='SELECT') renderSelect();
+  else if(STATE==='PLAYING'||STATE==='MP_PLAYING'){ updatePlaying(dt); renderPlaying(); }
+  else if(STATE==='RESULT') renderResult();
+  else if(STATE==='MP_MENU') renderMPMenu();
+  else if(STATE==='MP_SELECT') renderSelect();
+  else if(STATE==='MP_COUNTDOWN') renderMPCountdown(dt);
+  else if(STATE==='MP_WAIT_RESULT') renderMPWaitResult();
+  else if(STATE==='MP_RESULT') renderMPResult();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
