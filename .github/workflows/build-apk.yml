@@ -1,0 +1,113 @@
+yaml
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정 (에셋 생성용)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 에셋 생성 의존성 설치
+        run: pip install numpy pillow
+
+      - name: 오리지널 배경음악/효과음/고해상도 이미지 생성 (풀 버전)
+        run: python3 tools/generate_assets.py --outdir www/assets/audio --imgdir www/assets/img
+
+      - name: Node 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: npm 의존성 설치
+        run: npm ci
+
+      - name: JDK 17 설정
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Android SDK 설정
+        uses: android-actions/setup-android@v3
+
+      - name: Android 네이티브 프로젝트 생성 (Capacitor)
+        run: npx cap add android
+
+      - name: 앱 이름/패키지명/권한 커스터마이징
+        run: |
+          set -e
+          APPID="com.happychurch.dunkrusharena"
+          sed -i "s/com\.getcapacitor\.myapp/${APPID}/g" android/app/build.gradle
+          sed -i "s/com\.getcapacitor\.app/${APPID}/g" android/app/build.gradle
+          cat > android/app/src/main/res/values/strings.xml <<EOF
+          <?xml version='1.0' encoding='utf-8'?>
+          <resources>
+              <string name="app_name">덩크 러시 아레나</string>
+              <string name="title_activity_main">덩크 러시 아레나</string>
+              <string name="package_name">${APPID}</string>
+              <string name="custom_url_scheme">${APPID}</string>
+          </resources>
+          EOF
+          cat > android/app/src/main/res/values/colors.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="colorPrimary">#0b1024</color>
+              <color name="colorPrimaryDark">#05070f</color>
+              <color name="colorAccent">#29e0ff</color>
+              <color name="splashBackground">#070a18</color>
+          </resources>
+          EOF
+          mkdir -p "android/app/src/main/java/com/happychurch/dunkrusharena"
+          cat > "android/app/src/main/java/com/happychurch/dunkrusharena/MainActivity.java" <<JAVA
+          package ${APPID};
+
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {}
+          JAVA
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />#' android/app/src/main/AndroidManifest.xml
+
+      - name: 앱 아이콘 / 스플래시 이미지 적용
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y imagemagick
+          for entry in "mdpi:48" "hdpi:72" "xhdpi:96" "xxhdpi:144" "xxxhdpi:192"; do
+            density="${entry%%:*}"; sz="${entry##*:}"
+            dir="android/app/src/main/res/mipmap-$density"
+            mkdir -p "$dir"
+            convert icon-1024.png -resize ${sz}x${sz} "$dir/ic_launcher.png"
+            convert icon-1024.png -resize ${sz}x${sz} "$dir/ic_launcher_round.png"
+            convert icon-1024.png -resize ${sz}x${sz} "$dir/ic_launcher_foreground.png"
+          done
+          mkdir -p android/app/src/main/res/drawable
+          cp www/assets/img/splash.png android/app/src/main/res/drawable/splash.png
+
+      - name: 웹 게임을 Android 프로젝트로 동기화 (Capacitor)
+        run: npx cap sync android
+
+      - name: gradlew 실행 권한 부여
+        run: chmod +x android/gradlew
+
+      - name: 디버그 APK 빌드 (사이드로드 설치용, 자동 서명됨)
+        working-directory: android
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: 빌드 결과 크기 확인
+        run: ls -lh android/app/build/outputs/apk/debug/
+
+      - name: APK 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: dunk-rush-arena-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
