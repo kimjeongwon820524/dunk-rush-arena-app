@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dunk-rush-arena-github-upload
     steps:
       - name: 소스 체크아웃
         uses: actions/checkout@v4
@@ -98,7 +101,7 @@ jobs:
         run: chmod +x android/gradlew
 
       - name: 디버그 APK 빌드 (사이드로드 설치용, 자동 서명됨)
-        working-directory: android
+        working-directory: dunk-rush-arena-github-upload/android
         run: ./gradlew assembleDebug --stacktrace
 
       - name: 빌드 결과 크기 확인
@@ -108,5 +111,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dunk-rush-arena-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: dunk-rush-arena-github-upload/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
